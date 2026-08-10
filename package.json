@@ -1,0 +1,58 @@
+{
+  "name": "rsc-sentinel",
+  "version": "0.1.0",
+  "description": "Live vulnerability scanning and Server Action hardening for React Server Components / Next.js App Router projects. Detects known RSC advisories via npm's live audit data (not a hardcoded version table) and adds honest, clearly-scoped defense-in-depth to Server Actions.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "rsc-sentinel": "./bin/rsc-sentinel.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --experimental-strip-types tests/*.test.ts",
+    "check": "node ./bin/rsc-sentinel.js check",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "nextjs",
+    "react",
+    "react-server-components",
+    "security",
+    "vulnerability-scanner",
+    "server-actions",
+    "cve-2026-23869"
+  ],
+  "author": "Abdullah Jan",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "next": ">=15.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "rsc-sentinel": "^0.1.0"
+  }
+}
