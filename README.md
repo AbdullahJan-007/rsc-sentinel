@@ -389,7 +389,7 @@ published, and this area has kept producing new ones.
   rewrite vulnerable code for you.
 - **The guard's timeout cannot stop a synchronous CPU-exhaustion attack** — see the
   warning in [Part 7](#part-7--using-the-server-action-guard-in-your-code).
-- **It doesn't support yarn or pnpm yet** — see [Part 9](#part-9--common-errors-and-what-they-actually-mean).
+- **It doesn't support yarn or pnpm yet** — see [Part 8](#part-8--common-errors-and-what-they-actually-mean).
 
 ---
 
