@@ -1,6 +1,6 @@
 "use server";
 
-import { withActionGuard, ActionGuardError } from "rsc-sentinel";
+import { createActionGuard } from "rsc-sentinel/guard";
 
 export interface SubmitResult {
   ok: boolean;
@@ -8,30 +8,12 @@ export interface SubmitResult {
 }
 
 /**
- * The real business logic. Notice it takes exactly one argument — the
- * FormData Next.js hands a Server Action bound to a <form action={}> — and
- * nothing else. No (req, res) pair exists here; Next.js never constructs one
- * for Server Actions.
+ * Reusable guard instance (NOT exported — Next.js `'use server'` files may
+ * only export `async function` declarations).
  */
-async function handleSubmit(formData: FormData): Promise<SubmitResult> {
-  const name = String(formData.get("name") ?? "").trim();
-  const message = String(formData.get("message") ?? "").trim();
-
-  if (!name || !message) {
-    return { ok: false, message: "Name and message are required." };
-  }
-
-  // Simulate real work (e.g. a DB write) so the timeout path is demonstrable.
-  const artificialDelayMs = Number(formData.get("simulateDelayMs") ?? 0);
-  if (artificialDelayMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, artificialDelayMs));
-  }
-
-  return { ok: true, message: `Received ${message.length} characters from ${name}.` };
-}
-
-export const submitGuarded = withActionGuard(handleSubmit, {
+const contactGuard = createActionGuard({
   maxFormDataBytes: 4 * 1024, // deliberately small so the demo can trip it
+  maxFormDataEntries: 20,
   timeoutMs: 2000, // deliberately short so the demo can trip it
   onBlocked: (reason, detail) => {
     console.warn(`[rsc-sentinel] blocked (${reason}): ${detail}`);
@@ -39,25 +21,59 @@ export const submitGuarded = withActionGuard(handleSubmit, {
 });
 
 /**
- * Server Action adapter for useActionState: (previousState, formData) -> newState.
- * This is the shape the form on the page actually binds to.
+ * Server Action adapter for `useActionState`: `(previousState, formData) -> newState`.
+ * Uses `safeRun` so guard rejections return an RSC-serializable result object
+ * instead of throwing an error that Next.js sanitizes in production.
  */
 export async function submitAction(
   _prevState: SubmitResult | null,
   formData: FormData,
 ): Promise<SubmitResult> {
-  try {
-    return await submitGuarded(formData);
-  } catch (err) {
-    if (err instanceof ActionGuardError) {
+  const guarded = await contactGuard.safeRun([formData], async (signal) => {
+    const name = String(formData.get("name") ?? "").trim();
+    const message = String(formData.get("message") ?? "").trim();
+
+    if (!name || !message) {
+      return { ok: false, message: "Name and message are required." };
+    }
+
+    // Simulate async work that honors cooperative AbortSignal cancellation.
+    const artificialDelayMs = Number(formData.get("simulateDelayMs") ?? 0);
+    if (artificialDelayMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, artificialDelayMs);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      });
+    }
+
+    return {
+      ok: true,
+      message: `Received ${message.length} characters from ${name}.`,
+    };
+  });
+
+  if (!guarded.ok) {
+    if (guarded.error.reason === "size_limit") {
+      return { ok: false, message: "Blocked by rsc-sentinel: payload too large." };
+    }
+    if (guarded.error.reason === "entry_limit") {
+      return { ok: false, message: "Blocked by rsc-sentinel: too many form fields." };
+    }
+    if (guarded.error.reason === "timeout") {
       return {
         ok: false,
-        message:
-          err.reason === "size_limit"
-            ? "Blocked by rsc-sentinel: payload too large."
-            : "Blocked by rsc-sentinel: the action took too long and was cut off.",
+        message: "Blocked by rsc-sentinel: the action took too long and was cut off.",
       };
     }
-    throw err;
+    return { ok: false, message: "Blocked by rsc-sentinel: invalid input structure." };
   }
+
+  return guarded.data;
 }

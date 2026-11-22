@@ -1,13 +1,31 @@
 /**
- * Types for `npm audit --json`.
+ * Types for `npm audit --json` and normalized `rsc-sentinel` scan reports.
  *
- * These are modeled directly off real output captured from npm 10.x against
- * the live registry (registry.npmjs.org), not assumed from documentation.
- * `via` is the one field worth double-checking if npm changes its report
- * format in the future: it mixes two shapes in the same array.
+ * Modeled directly off real output captured from npm 10.x / 11.x against
+ * `registry.npmjs.org`.
  */
 
 export type Severity = "info" | "low" | "moderate" | "high" | "critical";
+
+export const SEVERITY_ORDER: Readonly<Record<Severity, number>> = {
+  info: 0,
+  low: 1,
+  moderate: 2,
+  high: 3,
+  critical: 4,
+};
+
+export const VALID_SEVERITIES: readonly Severity[] = [
+  "info",
+  "low",
+  "moderate",
+  "high",
+  "critical",
+];
+
+export function isSeverity(value: string): value is Severity {
+  return (VALID_SEVERITIES as readonly string[]).includes(value);
+}
 
 export interface NpmAuditAdvisory {
   source: number;
@@ -17,7 +35,7 @@ export interface NpmAuditAdvisory {
   url: string;
   severity: Severity;
   cwe: string[];
-  cvss: {
+  cvss?: {
     score: number;
     vectorString: string;
   };
@@ -26,8 +44,7 @@ export interface NpmAuditAdvisory {
 
 /**
  * `via` entries are either a full advisory object, or a plain string naming
- * another package this vulnerability is inherited through (a transitive
- * dependency chain reference, not an advisory itself).
+ * another package this vulnerability is inherited through.
  */
 export type NpmAuditViaEntry = NpmAuditAdvisory | string;
 
@@ -51,11 +68,11 @@ export interface NpmAuditVulnerability {
 }
 
 export interface NpmAuditReport {
-  auditReportVersion: number;
+  auditReportVersion?: number;
   vulnerabilities: Record<string, NpmAuditVulnerability>;
-  metadata: {
-    vulnerabilities: Record<Severity, number> & { total: number };
-    dependencies: {
+  metadata?: {
+    vulnerabilities?: Record<Severity, number> & { total: number };
+    dependencies?: {
       prod: number;
       dev: number;
       optional: number;
@@ -68,18 +85,14 @@ export interface NpmAuditReport {
 
 /**
  * Normalized, de-duplicated finding used by the rest of this package.
- * One per (package, advisory) pair — a single package can have several
- * of these if multiple advisories apply to the installed version.
+ * One per (package, advisory) pair.
  */
 export interface Finding {
   packageName: string;
   /**
-   * The version actually resolved in node_modules, read directly from that
-   * package's own package.json — not the declared range from the parent
-   * package.json. A declared range like "^19.1.0" tells you nothing about
-   * whether the resolved copy is patched; the resolved version does.
-   * Null if the package folder couldn't be read (e.g. hoisting quirks,
-   * workspaces).
+   * The version actually resolved in `node_modules` (including nested and
+   * hoisted monorepo installs), read from that package's own `package.json`.
+   * Null if the package folder could not be read.
    */
   installedVersion: string | null;
   severity: Severity;
@@ -88,9 +101,15 @@ export interface Finding {
   cwe: string[];
   cvssScore: number | null;
   vulnerableRange: string;
+  /** True when npm reports any fix is available (boolean `true` or fix object). */
+  fixAvailable: boolean;
+  /** Package to upgrade when npm specifies a fix target (may differ from `packageName` for transitive deps). */
+  fixPackage: string | null;
+  /** Target version to upgrade to, if npm specifies one. */
   fixedIn: string | null;
+  /** True if the fix requires a semver-major upgrade, false if non-breaking, null if no fix is published. */
   fixIsBreaking: boolean | null;
-  /** True if this advisory's title/package matches known RSC/Flight-protocol patterns. */
+  /** True if this advisory's package or title matches React Server Components / Flight-protocol patterns. */
   isRscRelated: boolean;
 }
 
@@ -98,7 +117,7 @@ export interface ScanResult {
   scannedAt: string;
   projectPath: string;
   findings: Finding[];
-  /** Findings sorted into this bucket if isRscRelated is true. */
+  /** Subset of `findings` where `isRscRelated` is true. */
   rscFindings: Finding[];
   totalsBySeverity: Record<Severity, number>;
   clean: boolean;

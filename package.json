@@ -1,14 +1,23 @@
 {
   "name": "rsc-sentinel",
-  "version": "0.1.0",
-  "description": "Live vulnerability scanning and Server Action hardening for React Server Components / Next.js App Router projects. Detects known RSC advisories via npm's live audit data (not a hardcoded version table) and adds honest, clearly-scoped defense-in-depth to Server Actions.",
+  "version": "0.2.0",
+  "description": "Live vulnerability scanning and production-hardened Server Action guards for React Server Components & Next.js App Router projects.",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./guard": {
+      "types": "./dist/guard.d.ts",
+      "import": "./dist/guard.js"
+    },
+    "./scanner": {
+      "types": "./dist/scanner.d.ts",
+      "import": "./dist/scanner.js"
     }
   },
   "bin": {
@@ -21,22 +30,43 @@
     "LICENSE"
   ],
   "scripts": {
+    "clean": "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-test',{recursive:true,force:true});\"",
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test --experimental-strip-types tests/*.test.ts",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run build:test && node --test dist-test/tests/unit/*.test.js dist-test/tests/security/*.test.js dist-test/tests/integration/*.test.js",
+    "test:unit": "npm run build && npm run build:test && node --test dist-test/tests/unit/*.test.js",
+    "test:security": "npm run build && npm run build:test && node --test dist-test/tests/security/*.test.js",
+    "test:integration": "npm run build && npm run build:test && node --test dist-test/tests/integration/*.test.js",
     "check": "node ./bin/rsc-sentinel.js check",
-    "prepublishOnly": "npm run build && npm test"
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run clean && npm run typecheck && npm test"
   },
   "keywords": [
     "nextjs",
+    "next",
     "react",
     "react-server-components",
+    "rsc",
+    "server-actions",
     "security",
     "vulnerability-scanner",
-    "server-actions",
+    "app-router",
     "cve-2026-23869"
   ],
   "author": "Abdullah Jan",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AbdullahJan-007/rsc-sentinel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AbdullahJan-007/rsc-sentinel/issues"
+  },
+  "homepage": "https://github.com/AbdullahJan-007/rsc-sentinel#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
@@ -51,8 +81,5 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "typescript": "^5.7.3"
-  },
-  "dependencies": {
-    "rsc-sentinel": "^0.1.0"
   }
 }
