@@ -1,28 +1,28 @@
-# Engineering Memory & Red-Team Audit Log — `rsc-sentinel`
+# Architecture Decisions & Security Audit — `rsc-sentinel`
 
-This document records every bug, security vulnerability, and architectural decision uncovered during the v0.1.0 → v0.2.0 Staff Engineering & Red-Team overhaul so regressions never recur.
+A permanent record of security findings resolved between `v0.1.0` and `v0.2.0` and the architectural decisions behind the current design.
 
 ---
 
-## 1. Red-Team & Production Audit Findings (v0.1.0 → Fixed in v0.2.0)
+## 1. Security & Reliability Fixes (`v0.1.0` → `v0.2.0`)
 
-| ID | Severity | Area | Root Cause in v0.1.0 | Fix Implemented in v0.2.0 |
+| ID | Severity | Area | Issue in `v0.1.0` | Resolution in `v0.2.0` |
 | --- | --- | --- | --- | --- |
-| **SEC-01** | Critical | Next.js Bundling | Single root export (`src/index.ts`) mixed `node:child_process`/`node:fs` scanner with `withActionGuard`, breaking Next.js Edge/Client bundles. | Split into subpath exports: `rsc-sentinel/guard` (zero Node builtins), `rsc-sentinel/scanner` (Node-only), and root barrel; added `"sideEffects": false`. |
-| **SEC-02** | Critical | Next.js `"use server"` | Docs & `examples/nextjs-demo/app/actions.ts` used `export const x = withActionGuard(...)`, which fails Next.js SWC compiler (`A "use server" file can only export async functions`). | Added `createActionGuard()` with `run()` / `safeRun()` for `export async function` declarations; fixed demo & README. |
-| **SEC-03** | Critical | RSC Error Serialization | Throwing `ActionGuardError` across Next.js Server → Client boundary in production strips error class & message; `instanceof ActionGuardError` failed in prod. | Added RSC-serializable `ActionGuardResult<T>` (`safeRun` / `wrapSafe`) + Next.js `NEXT_REDIRECT`/`NEXT_NOT_FOUND` passthrough. |
-| **SEC-04** | Critical | npm Packaging | `package.json` accidentally listed `"rsc-sentinel": "^0.1.0"` inside its own `dependencies` (circular self-dependency). | Removed `dependencies` completely (zero runtime deps); added `repository`, `homepage`, `bugs`, `publishConfig`. |
-| **SEC-05** | Critical | Windows CLI Crash | `execFile("npm", ...)` failed with `ENOENT` on Windows Node 20.12+/22/24 (CVE-2024-27980 `.cmd` shim change), crashing `rsc-sentinel check` and `fix`. | Created `src/utils/npm-runner.ts` (`execNpm`) with safe `cmd.exe /d /s /c npm ...` on win32 + configurable timeout + explicit `ENOENT`/`TIMEOUT` errors. |
-| **SEC-06** | High | Guard Bypass (`NaN`) | Passing `NaN`, `0`, `-1`, or `Infinity` for `maxFormDataBytes` or `timeoutMs` silently disabled checks (`size > NaN` is `false`). | Eager `RangeError` validation in `resolveOptions()` for all numeric guard options. |
-| **SEC-07** | High | Guard DoS Bypasses | Only `FormData` byte size was checked — attackers could bypass with 100k 1-byte fields, massive non-FormData strings/objects/TypedArrays, deeply nested objects, or huge `File.name`. | Added `maxFormDataEntries`, `maxPayloadBytes`, `maxObjectDepth`, `File.name` byte counting, cycle-safe `WeakSet`, and short-circuiting inspection. |
-| **SEC-08** | High | Process Crash on Timeout | `Promise.race([action(), timeout])` left the losing `action()` promise unobserved — a late rejection triggered `UnhandledPromiseRejection` and crashed Node. | Attached `.catch()` forwarding to `onLateError`, plus cooperative `AbortController` `AbortSignal`. |
-| **SEC-09** | High | Path Traversal & Hoisting | `getInstalledVersion` joined `packageName` blindly (path traversal risk) and missed nested `vuln.nodes` and hoisted monorepo `node_modules`. | Added strict npm name regex, `isPathInside` containment check, `vuln.nodes` lookup, and ancestor `node_modules` walk. |
-| **SEC-10** | Medium | Scanner & CLI Bugs | `isAuditReport` accepted `vulnerabilities: null`; `fixAvailable: true` showed "none published yet"; `fixPackage` was omitted; unknown CLI command exited `0`; `VERSION` was hardcoded; `--experimental-strip-types` broke Node 20. | Fixed all 6 issues; compiled tests via `tsconfig.test.json`; added `--rsc-only`, `--fail-on`, `--timeout`, and JSON error output. |
+| **SEC-01** | Critical | Next.js Bundling | Single root entrypoint (`src/index.ts`) combined Node-only scanner (`node:child_process`, `node:fs`) with `withActionGuard`, breaking Edge Runtime and Client bundles. | Split into subpath exports: `rsc-sentinel/guard` (zero Node builtins), `rsc-sentinel/scanner` (Node-only), and root barrel; added `"sideEffects": false`. |
+| **SEC-02** | Critical | Next.js `"use server"` | Exporting `export const fn = withActionGuard(...)` from a `"use server"` file fails Next.js SWC compilation. | Introduced `createActionGuard()` with `run()` / `safeRun()` for `export async function` declarations and updated examples. |
+| **SEC-03** | Critical | RSC Error Serialization | Thrown `ActionGuardError` instances are stripped across the Server-to-Client boundary in Next.js production builds. | Added RSC-serializable `ActionGuardResult<T>` (`safeRun` / `wrapSafe`) and `isNextControlFlowError()` passthrough for `redirect()` / `notFound()`. |
+| **SEC-04** | Critical | Package Metadata | `package.json` listed `rsc-sentinel` inside its own `dependencies` (circular self-dependency). | Removed `dependencies` (zero runtime dependencies) and added `repository`, `homepage`, `bugs`, and `publishConfig`. |
+| **SEC-05** | Critical | Windows CLI Execution | `execFile("npm", ...)` failed with `ENOENT` on Windows Node.js 20.12+/22/24 due to `.cmd` shim restrictions. | Added cross-platform `src/utils/npm-runner.ts` (`execNpm`) using `cmd.exe /d /s /c npm ...` on `win32` with `windowsHide: true` and configurable timeout. |
+| **SEC-06** | High | Guard Config Bypass | Passing `NaN`, `0`, `-1`, or `Infinity` for numeric guard options silently disabled size/timeout checks (`size > NaN === false`). | Added eager `RangeError` validation for all numeric options in `resolveOptions()`. |
+| **SEC-07** | High | Payload DoS Bypasses | Only `FormData` total bytes were checked; field-floods, massive non-`FormData` payloads, deeply nested objects, and oversized `File.name` bypassed inspection. | Added `maxFormDataEntries`, `maxPayloadBytes`, `maxObjectDepth`, `File.name` byte counting, cycle-safe `WeakSet` tracking, and short-circuit evaluation. |
+| **SEC-08** | High | Timeout Crash Safety | `Promise.race([action(), timeout])` left the losing action promise unobserved; late rejections triggered `UnhandledPromiseRejection`. | Attached a late-rejection handler (`onLateError`) and cooperative `AbortController` `AbortSignal`. |
+| **SEC-09** | High | Path Traversal & Hoisting | `getInstalledVersion` joined `packageName` directly without path validation and missed nested `vuln.nodes` and hoisted monorepo installs. | Added npm package name validation, `isPathInside` containment checks, `vuln.nodes` resolution, and ancestor `node_modules` traversal. |
+| **SEC-10** | Medium | Scanner & CLI Edge Cases | `isAuditReport` accepted `vulnerabilities: null`; boolean `fixAvailable: true` reported no fix; `fixPackage` was omitted; unknown commands exited `0`; `VERSION` was hardcoded; test script used Node 22+ `--experimental-strip-types`. | Hardened report validation, normalized all `fixAvailable` shapes, added `--rsc-only`/`--fail-on`/`--timeout` and structured `--json` errors, loaded version dynamically, and compiled tests via `tsconfig.test.json`. |
 
 ---
 
-## 2. Key Architectural Decisions (ADRs)
+## 2. Architectural Decision Records (ADRs)
 
-- **ADR-001 (Subpath Exports):** Expose `rsc-sentinel/guard` separately from `rsc-sentinel/scanner` rather than relying solely on tree-shaking, guaranteeing zero Node-builtin leakage in Next.js Edge/Client bundles.
-- **ADR-002 (Compiled Tests for Node 20+):** Compile tests into `dist-test/` with `tsconfig.test.json` instead of using `--experimental-strip-types`, ensuring 100% compatibility with `"engines": { "node": ">=20.0.0" }`.
-- **ADR-003 (Keep `withActionGuard` Backwards-Compatible):** Retain `withActionGuard` alongside `createActionGuard` so existing v0.1.0 callers upgrade to v0.2.0 seamlessly without breaking imports.
+- **ADR-001 — Explicit Subpath Exports:** Expose `rsc-sentinel/guard` separately from `rsc-sentinel/scanner` rather than relying solely on bundler tree-shaking, guaranteeing zero Node.js builtin leakage into Next.js Edge and Client bundles.
+- **ADR-002 — Compiled Test Suite for Node 20+:** Compile TypeScript tests into `dist-test/` with `tsconfig.test.json` instead of relying on `--experimental-strip-types`, ensuring full compatibility with `"engines": { "node": ">=20.0.0" }`.
+- **ADR-003 — Backwards-Compatible Guard API:** Keep `withActionGuard` exported alongside `createActionGuard` so existing `v0.1.0` consumers upgrade to `v0.2.0` without breaking imports.
