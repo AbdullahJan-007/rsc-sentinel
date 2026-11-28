@@ -118,4 +118,28 @@ describe("CLI Integration Tests (real subprocess)", () => {
     assert.ok(Array.isArray(parsed.rscFindings));
     assert.equal(parsed.totalsBySeverity.critical, 0);
   });
+
+  test("check --sarif emits valid SARIF 2.1.0 JSON and exits 0 on clean repo", async () => {
+    const res = await runCli(["check", "--path", REPO_ROOT, "--sarif"]);
+    assert.equal(res.exitCode, 0);
+    const sarif = JSON.parse(res.stdout) as {
+      version: string;
+      runs: Array<{ tool: { driver: { name: string } }; results: unknown[] }>;
+    };
+    assert.equal(sarif.version, "2.1.0");
+    assert.equal(sarif.runs[0]?.tool.driver.name, "rsc-sentinel");
+    assert.deepEqual(sarif.runs[0]?.results, []);
+  });
+
+  test("rejects conflicting --json and --sarif flags with exit code 2", async () => {
+    const res = await runCli(["check", "--json", "--sarif"]);
+    assert.equal(res.exitCode, 2);
+    assert.match(res.stderr, /cannot be combined/);
+  });
+
+  test("rejects invalid --pm value with exit code 2", async () => {
+    const res = await runCli(["check", "--pm", "bun"]);
+    assert.equal(res.exitCode, 2);
+    assert.match(res.stderr, /Invalid --pm/);
+  });
 });

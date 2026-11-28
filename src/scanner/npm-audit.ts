@@ -1,12 +1,21 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { execNpm } from "../utils/npm-runner.js";
+import {
+  detectPackageManager,
+  execPackageManager,
+  type PackageManager,
+} from "../utils/pm-runner.js";
+import {
+  normalizePnpmAuditReport,
+  normalizeYarnAuditOutput,
+} from "./adapters.js";
 import type { NpmAuditReport } from "./types.js";
 
 export type NpmAuditErrorCode =
   | "NO_PACKAGE_JSON"
   | "NO_LOCKFILE"
   | "NPM_NOT_FOUND"
+  | "PM_NOT_FOUND"
   | "TIMEOUT"
   | "NO_OUTPUT"
   | "INVALID_JSON"
@@ -24,23 +33,26 @@ export class NpmAuditError extends Error {
 }
 
 export interface RunNpmAuditOptions {
-  /** Timeout in milliseconds for `npm audit --json`. Default: 60000 (60s). */
+  /** Timeout in milliseconds for the audit command. Default: 60000 (60s). */
   timeoutMs?: number;
+  /** Package manager to use. Defaults to `"auto"` (lockfile detection). */
+  packageManager?: "auto" | PackageManager;
+}
+
+export interface AuditExecutionResult {
+  packageManager: PackageManager;
+  report: NpmAuditReport;
 }
 
 /**
- * Runs `npm audit --json` in the given project directory and returns the
- * parsed report.
- *
- * Important: `npm audit` exits with a non-zero code whenever it finds
- * vulnerabilities — that's expected behavior, not a failed command. We only
- * throw when `npm` cannot run, times out, returns an `{ "error": ... }` payload,
- * or returns invalid/unexpected JSON.
+ * Runs the appropriate package manager's live audit command (`npm audit --json`,
+ * `pnpm audit --json`, or `yarn npm audit --json` / `yarn audit --json`) and
+ * returns a normalized `NpmAuditReport`.
  */
-export async function runNpmAudit(
+export async function runAudit(
   projectPath: string,
   options: RunNpmAuditOptions = {},
-): Promise<NpmAuditReport> {
+): Promise<AuditExecutionResult> {
   const resolvedPath = resolve(projectPath);
 
   if (!existsSync(join(resolvedPath, "package.json"))) {
@@ -49,10 +61,14 @@ export async function runNpmAudit(
       "NO_PACKAGE_JSON",
     );
   }
-  if (!existsSync(join(resolvedPath, "package-lock.json"))) {
+
+  const requestedPm = options.packageManager ?? "auto";
+  const pm: PackageManager | null =
+    requestedPm === "auto" ? detectPackageManager(resolvedPath) : requestedPm;
+
+  if (!pm) {
     throw new NpmAuditError(
-      "No package-lock.json found. npm audit needs a lockfile — run `npm install` first. " +
-        "(yarn.lock / pnpm-lock.yaml projects aren't supported yet: npm audit only reads its own lockfile format.)",
+      "No lockfile found (package-lock.json, pnpm-lock.yaml, or yarn.lock). Run your package manager's install command first.",
       "NO_LOCKFILE",
     );
   }
@@ -62,11 +78,61 @@ export async function runNpmAudit(
       ? { cwd: resolvedPath, timeoutMs: options.timeoutMs }
       : { cwd: resolvedPath };
 
-  const execResult = await execNpm(["audit", "--json"], execOpts);
+  if (pm === "pnpm") {
+    return {
+      packageManager: "pnpm",
+      report: await runPnpmAudit(execOpts, options.timeoutMs),
+    };
+  }
+
+  if (pm === "yarn") {
+    return {
+      packageManager: "yarn",
+      report: await runYarnAudit(execOpts, options.timeoutMs),
+    };
+  }
+
+  return {
+    packageManager: "npm",
+    report: await runNpmAuditInternal(resolvedPath, execOpts, options.timeoutMs),
+  };
+}
+
+/**
+ * Backwards-compatible helper that runs `npm audit --json` (or auto-detected PM
+ * when `options.packageManager` is provided) and returns `NpmAuditReport`.
+ */
+export async function runNpmAudit(
+  projectPath: string,
+  options: RunNpmAuditOptions = {},
+): Promise<NpmAuditReport> {
+  const { report } = await runAudit(projectPath, {
+    ...options,
+    packageManager: options.packageManager ?? "npm",
+  });
+  return report;
+}
+
+async function runNpmAuditInternal(
+  resolvedPath: string,
+  execOpts: { cwd: string; timeoutMs?: number },
+  timeoutMs?: number,
+): Promise<NpmAuditReport> {
+  if (
+    !existsSync(join(resolvedPath, "package-lock.json")) &&
+    !existsSync(join(resolvedPath, "npm-shrinkwrap.json"))
+  ) {
+    throw new NpmAuditError(
+      "No package-lock.json found. npm audit needs a lockfile — run `npm install` first.",
+      "NO_LOCKFILE",
+    );
+  }
+
+  const execResult = await execPackageManager("npm", ["audit", "--json"], execOpts);
 
   if (execResult.timedOut) {
     throw new NpmAuditError(
-      `npm audit timed out after ${options.timeoutMs ?? 60_000}ms. Check your network connection to the npm registry.`,
+      `npm audit timed out after ${timeoutMs ?? 60_000}ms. Check your network connection to the npm registry.`,
       "TIMEOUT",
     );
   }
@@ -112,6 +178,117 @@ export async function runNpmAudit(
   }
 
   return parsed;
+}
+
+async function runPnpmAudit(
+  execOpts: { cwd: string; timeoutMs?: number },
+  timeoutMs?: number,
+): Promise<NpmAuditReport> {
+  const execResult = await execPackageManager("pnpm", ["audit", "--json"], execOpts);
+
+  if (execResult.timedOut) {
+    throw new NpmAuditError(
+      `pnpm audit timed out after ${timeoutMs ?? 60_000}ms.`,
+      "TIMEOUT",
+    );
+  }
+
+  if (execResult.spawnErrorCode === "ENOENT") {
+    throw new NpmAuditError(
+      "Could not find `pnpm` on PATH. Install pnpm or run with `--pm npm`.",
+      "PM_NOT_FOUND",
+    );
+  }
+
+  const stdout = execResult.stdout.trim();
+  if (stdout.length === 0) {
+    const detail = execResult.stderr.trim() || execResult.spawnErrorCode || "(none)";
+    throw new NpmAuditError(
+      `pnpm audit produced no output. Details: ${detail}`,
+      "NO_OUTPUT",
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new NpmAuditError(
+      "pnpm audit did not return valid JSON output.",
+      "INVALID_JSON",
+    );
+  }
+
+  if (isErrorPayload(parsed)) {
+    throw new NpmAuditError(
+      parsed.error.summary ?? parsed.error.detail ?? "pnpm audit reported an error.",
+      parsed.error.code,
+    );
+  }
+
+  const normalized = normalizePnpmAuditReport(parsed);
+  if (!normalized) {
+    throw new NpmAuditError(
+      "pnpm audit returned an unexpected JSON shape.",
+      "UNEXPECTED_SHAPE",
+    );
+  }
+  return normalized;
+}
+
+async function runYarnAudit(
+  execOpts: { cwd: string; timeoutMs?: number },
+  timeoutMs?: number,
+): Promise<NpmAuditReport> {
+  // Try Yarn Berry (`yarn npm audit --json`) first; fall back to Yarn Classic v1 (`yarn audit --json`).
+  let execResult = await execPackageManager(
+    "yarn",
+    ["npm", "audit", "--json"],
+    execOpts,
+  );
+
+  if (execResult.spawnErrorCode === "ENOENT") {
+    throw new NpmAuditError(
+      "Could not find `yarn` on PATH. Install yarn or run with `--pm npm`.",
+      "PM_NOT_FOUND",
+    );
+  }
+
+  if (execResult.timedOut) {
+    throw new NpmAuditError(
+      `yarn audit timed out after ${timeoutMs ?? 60_000}ms.`,
+      "TIMEOUT",
+    );
+  }
+
+  let normalized =
+    execResult.stdout.trim().length > 0
+      ? normalizeYarnAuditOutput(execResult.stdout)
+      : null;
+
+  if (!normalized) {
+    execResult = await execPackageManager("yarn", ["audit", "--json"], execOpts);
+    if (execResult.timedOut) {
+      throw new NpmAuditError(
+        `yarn audit timed out after ${timeoutMs ?? 60_000}ms.`,
+        "TIMEOUT",
+      );
+    }
+    normalized =
+      execResult.stdout.trim().length > 0
+        ? normalizeYarnAuditOutput(execResult.stdout)
+        : null;
+  }
+
+  if (!normalized) {
+    const detail = execResult.stderr.trim() || "(none)";
+    throw new NpmAuditError(
+      `yarn audit did not return parseable JSON output. Details: ${detail}`,
+      "UNEXPECTED_SHAPE",
+    );
+  }
+
+  return normalized;
 }
 
 function isErrorPayload(

@@ -1,6 +1,7 @@
 # rsc-sentinel
 
 [![npm version](https://img.shields.io/npm/v/rsc-sentinel.svg)](https://www.npmjs.com/package/rsc-sentinel)
+[![CI](https://github.com/AbdullahJan-007/rsc-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/AbdullahJan-007/rsc-sentinel/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/AbdullahJan-007/rsc-sentinel/blob/main/LICENSE)
 [![node: >=20](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](https://www.npmjs.com/package/rsc-sentinel?activeTab=dependencies)
@@ -18,7 +19,7 @@
 - **Next.js `"use server"` Native** — `createActionGuard()` works directly inside `export async function` declarations, returns RSC-serializable result unions (`safeRun`), and preserves `redirect()` / `notFound()` control-flow errors untouched.
 - **Defense-in-Depth Input Guards** — Enforces `FormData` byte limits (including `File.name`), `FormData` entry caps (anti-field-flood), non-`FormData` payload byte limits, and circular-safe object nesting depth caps with short-circuit evaluation.
 - **Cooperative Cancellation & Crash Safety** — Passes an `AbortSignal` into actions on timeout and captures late rejections via `onLateError` so Node.js never crashes with `UnhandledPromiseRejection`.
-- **Live RSC Advisory Scanner** — Queries `npm audit --json` at runtime across Windows, macOS, and Linux; resolves the *actually installed* version in `node_modules` (including nested and monorepo-hoisted copies); tags RSC / Flight-protocol advisories; and supports `--rsc-only`, `--fail-on`, `--timeout`, and strict `--json` output for CI.
+- **Live Multi-PM RSC Advisory Scanner** — Auto-detects `npm` (`package-lock.json`), `pnpm` (`pnpm-lock.yaml`), and `yarn` (`yarn.lock`) across Windows, macOS, and Linux; resolves the *actually installed* version in `node_modules` (including nested and monorepo-hoisted copies); tags RSC / Flight-protocol advisories; and supports `--rsc-only`, `--fail-on`, `--pm`, `--timeout`, `--json`, and **SARIF 2.1.0 (`--sarif`)** for GitHub Code Scanning.
 
 ---
 
@@ -155,11 +156,13 @@ npx rsc-sentinel fix --force
 | --- | --- |
 | `rsc-sentinel check` | Run a live vulnerability scan (default command). |
 | `--json` | Output machine-readable JSON (including structured error payloads on exit code `2`). |
+| `--sarif` | Output spec-compliant SARIF 2.1.0 JSON for GitHub Code Scanning. |
 | `--path <dir>` | Target project directory (defaults to `process.cwd()`). |
+| `--pm <manager>` | Package manager: `auto` \| `npm` \| `pnpm` \| `yarn` (default: `auto`). |
 | `--rsc-only` | Report and gate exit code strictly on RSC / Flight-protocol findings. |
 | `--fail-on <severity>` | Minimum severity threshold: `info` \| `low` \| `moderate` \| `high` \| `critical` (default: `info`). |
-| `--timeout <ms>` | Timeout for `npm audit --json` in milliseconds (default: `60000`). |
-| `rsc-sentinel fix [--force]` | Delegate remediation to `npm audit fix` (with optional `--force`). |
+| `--timeout <ms>` | Timeout for the audit command in milliseconds (default: `60000`). |
+| `rsc-sentinel fix [--force]` | Delegate remediation to `npm audit fix` / `pnpm audit --fix`. |
 | `-h, --help` | Print usage information. |
 | `-v, --version` | Print installed version. |
 
@@ -171,11 +174,17 @@ npx rsc-sentinel fix --force
 | `1` | Vulnerabilities detected (or `fix` left unresolved advisories). |
 | `2` | Invalid arguments, unknown command, missing `package.json` or `package-lock.json`, `npm` unavailable, or timeout. |
 
-### GitHub Actions Integration
+### GitHub Actions & Code Scanning (SARIF)
 
 ```yaml
 - name: Check RSC security advisories
-  run: npx rsc-sentinel check --rsc-only --fail-on high
+  run: npx rsc-sentinel check --rsc-only --fail-on high --sarif > rsc-sentinel.sarif
+
+- name: Upload SARIF to GitHub Security tab
+  if: always()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: rsc-sentinel.sarif
 ```
 
 ### Programmatic Scanner API (`rsc-sentinel/scanner`)
@@ -199,6 +208,8 @@ if (!result.clean) {
 
 ## Documentation & Examples
 
+- [Changelog](https://github.com/AbdullahJan-007/rsc-sentinel/blob/main/CHANGELOG.md)
+- [Security Policy](https://github.com/AbdullahJan-007/rsc-sentinel/blob/main/SECURITY.md)
 - [Next.js App Router Demo](https://github.com/AbdullahJan-007/rsc-sentinel/tree/main/examples/nextjs-demo)
 - [Product Requirements (PRD)](https://github.com/AbdullahJan-007/rsc-sentinel/blob/main/docs/PRD.md)
 - [System Architecture](https://github.com/AbdullahJan-007/rsc-sentinel/blob/main/docs/architecture.md)

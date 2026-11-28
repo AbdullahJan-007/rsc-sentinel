@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { scan } from "./scanner/scan.js";
+import { scan, toSarif } from "./scanner/scan.js";
 import { NpmAuditError } from "./scanner/npm-audit.js";
 import {
   VALID_SEVERITIES,
@@ -11,7 +11,11 @@ import {
   type ScanResult,
   type Severity,
 } from "./scanner/types.js";
-import { execNpm } from "./utils/npm-runner.js";
+import {
+  detectPackageManager,
+  execPackageManager,
+  type PackageManager,
+} from "./utils/pm-runner.js";
 
 function loadPackageVersion(): string {
   try {
@@ -26,6 +30,8 @@ function loadPackageVersion(): string {
 }
 
 const VERSION = loadPackageVersion();
+const VALID_PMS = ["auto", "npm", "pnpm", "yarn"] as const;
+type PmOption = (typeof VALID_PMS)[number];
 
 const SEVERITY_LABEL: Record<Severity, string> = {
   critical: "CRITICAL",
@@ -39,27 +45,29 @@ function printHelp(stream: "stdout" | "stderr" = "stdout"): void {
   const text = `rsc-sentinel v${VERSION}
 
 Live vulnerability scanning for React Server Components / Next.js projects.
-Queries npm's live advisory database at run time — never a stale hardcoded list.
+Queries live advisory data via npm, pnpm, or yarn — never a stale hardcoded list.
 
 Usage:
   rsc-sentinel check [options]
-  rsc-sentinel fix [--force] [--path <dir>]
+  rsc-sentinel fix [--force] [--path <dir>] [--pm <auto|npm|pnpm|yarn>]
   rsc-sentinel --help
   rsc-sentinel --version
 
 Commands:
   check   Scan the project and report known vulnerabilities (default).
-  fix     Run npm's own audit fix. Without --force, only applies non-breaking
-          fixes. With --force, allows semver-major upgrades (review & test first).
+  fix     Run your package manager's audit fix (npm/pnpm). Without --force,
+          only applies non-breaking fixes.
 
 Options:
   --json                 Print machine-readable JSON output (including errors).
+  --sarif                Print SARIF 2.1.0 output for GitHub Code Scanning.
   --path <dir>           Project directory to scan. Defaults to current directory.
+  --pm <manager>         Package manager: auto | npm | pnpm | yarn (default: auto).
   --rsc-only             Only report and fail on RSC / Flight-protocol findings.
   --fail-on <severity>   Minimum severity to report/fail on:
                          info | low | moderate | high | critical (default: info).
-  --timeout <ms>         Timeout for npm audit in milliseconds (default: 60000).
-  --force                (fix only) Allow npm to apply semver-major fixes.
+  --timeout <ms>         Timeout for the audit command in milliseconds (default: 60000).
+  --force                (fix only) Allow semver-major fixes (npm).
   -h, --help             Show this help message.
   -v, --version          Print version number.
 
@@ -109,8 +117,9 @@ function printReport(result: ScanResult): void {
   }
 
   const t = result.totalsBySeverity;
+  const pmTag = result.packageManager ? ` via ${result.packageManager}` : "";
   console.log(
-    `Found ${result.findings.length} finding(s): ` +
+    `Found ${result.findings.length} finding(s)${pmTag}: ` +
       `${t.critical} critical, ${t.high} high, ${t.moderate} moderate, ${t.low} low, ${t.info} info.`,
   );
 
@@ -141,6 +150,8 @@ function emitError(message: string, code: string, json: boolean): void {
 async function runCheck(opts: {
   projectPath: string;
   json: boolean;
+  sarif: boolean;
+  packageManager: PmOption;
   rscOnly: boolean;
   minSeverity: Severity;
   timeoutMs: number | undefined;
@@ -148,11 +159,13 @@ async function runCheck(opts: {
   try {
     const scanOpts: {
       projectPath: string;
+      packageManager: PmOption;
       rscOnly: boolean;
       minSeverity: Severity;
       timeoutMs?: number;
     } = {
       projectPath: opts.projectPath,
+      packageManager: opts.packageManager,
       rscOnly: opts.rscOnly,
       minSeverity: opts.minSeverity,
     };
@@ -161,7 +174,9 @@ async function runCheck(opts: {
     }
 
     const result = await scan(scanOpts);
-    if (opts.json) {
+    if (opts.sarif) {
+      console.log(JSON.stringify(toSarif(result, VERSION), null, 2));
+    } else if (opts.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
       printReport(result);
@@ -176,22 +191,44 @@ async function runCheck(opts: {
   }
 }
 
-async function runFix(projectPath: string, force: boolean): Promise<number> {
+async function runFix(
+  projectPath: string,
+  force: boolean,
+  pmOption: PmOption,
+): Promise<number> {
   const resolvedPath = resolve(projectPath);
-  const args = force ? ["audit", "fix", "--force"] : ["audit", "fix"];
-  console.log(`Running: npm ${args.join(" ")}`);
+  const pm: PackageManager =
+    pmOption === "auto"
+      ? (detectPackageManager(resolvedPath) ?? "npm")
+      : pmOption;
 
-  const res = await execNpm(args, { cwd: resolvedPath });
+  if (pm === "yarn") {
+    console.error(
+      "rsc-sentinel: Yarn does not provide an automated `audit fix` command. " +
+        "Upgrade affected packages with `yarn up <pkg>` or add `resolutions` in package.json.",
+    );
+    return 2;
+  }
+
+  const args =
+    pm === "pnpm"
+      ? ["audit", "--fix"]
+      : force
+        ? ["audit", "fix", "--force"]
+        : ["audit", "fix"];
+
+  console.log(`Running: ${pm} ${args.join(" ")}`);
+  const res = await execPackageManager(pm, args, { cwd: resolvedPath });
 
   if (res.spawnErrorCode === "ENOENT") {
     console.error(
-      "rsc-sentinel: Could not find `npm` on PATH. Ensure Node.js and npm are installed.",
+      `rsc-sentinel: Could not find \`${pm}\` on PATH. Ensure it is installed and accessible.`,
     );
     return 2;
   }
 
   if (res.timedOut) {
-    console.error("rsc-sentinel: npm audit fix timed out.");
+    console.error(`rsc-sentinel: ${pm} audit fix timed out.`);
     return 2;
   }
 
@@ -203,8 +240,8 @@ async function runFix(projectPath: string, force: boolean): Promise<number> {
   }
 
   console.log(
-    "\nSome fixes may require a semver-major upgrade. Re-run with --force to allow those, " +
-      "then re-run `rsc-sentinel check` and your own test suite before committing.",
+    "\nSome fixes may require a semver-major upgrade. Review affected packages, " +
+      "then re-run `rsc-sentinel check` and your test suite before committing.",
   );
   return 1;
 }
@@ -219,7 +256,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       allowPositionals: true,
       options: {
         json: { type: "boolean", default: false },
+        sarif: { type: "boolean", default: false },
         path: { type: "string" },
+        pm: { type: "string" },
         force: { type: "boolean", default: false },
         "rsc-only": { type: "boolean", default: false },
         "fail-on": { type: "string" },
@@ -236,6 +275,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const { positionals, values } = parsed;
   const json = Boolean(values.json);
+  const sarif = Boolean(values.sarif);
 
   if (values.version) {
     console.log(VERSION);
@@ -245,6 +285,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (values.help) {
     printHelp("stdout");
     return 0;
+  }
+
+  if (json && sarif) {
+    emitError(
+      "Options --json and --sarif cannot be combined. Choose one output format.",
+      "CONFLICTING_FLAGS",
+      false,
+    );
+    return 2;
   }
 
   const rawCommand = positionals[0];
@@ -259,6 +308,20 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const command = rawCommand ?? "check";
   const projectPath = typeof values.path === "string" ? values.path : process.cwd();
+
+  let pmOption: PmOption = "auto";
+  if (typeof values.pm === "string") {
+    const candidate = values.pm.toLowerCase();
+    if (!(VALID_PMS as readonly string[]).includes(candidate)) {
+      emitError(
+        `Invalid --pm value "${values.pm}". Expected one of: ${VALID_PMS.join(", ")}.`,
+        "INVALID_PM",
+        json,
+      );
+      return 2;
+    }
+    pmOption = candidate as PmOption;
+  }
 
   let minSeverity: Severity = "info";
   if (typeof values["fail-on"] === "string") {
@@ -289,12 +352,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   }
 
   if (command === "fix") {
-    return runFix(projectPath, Boolean(values.force));
+    return runFix(projectPath, Boolean(values.force), pmOption);
   }
 
   return runCheck({
     projectPath,
     json,
+    sarif,
+    packageManager: pmOption,
     rscOnly: Boolean(values["rsc-only"]),
     minSeverity,
     timeoutMs,

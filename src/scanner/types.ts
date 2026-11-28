@@ -116,6 +116,8 @@ export interface Finding {
 export interface ScanResult {
   scannedAt: string;
   projectPath: string;
+  /** Package manager whose lockfile/audit tool produced this result. */
+  packageManager?: "npm" | "pnpm" | "yarn";
   findings: Finding[];
   /** Subset of `findings` where `isRscRelated` is true. */
   rscFindings: Finding[];

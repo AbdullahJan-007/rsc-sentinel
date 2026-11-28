@@ -207,7 +207,7 @@ export function filterScanResult(
     return true;
   });
 
-  return {
+  const out: ScanResult = {
     scannedAt: result.scannedAt,
     projectPath: result.projectPath,
     findings: filtered,
@@ -215,4 +215,8 @@ export function filterScanResult(
     totalsBySeverity: computeTotals(filtered),
     clean: filtered.length === 0,
   };
+  if (result.packageManager !== undefined) {
+    out.packageManager = result.packageManager;
+  }
+  return out;
 }
