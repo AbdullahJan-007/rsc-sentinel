@@ -4,11 +4,17 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
+const currentDir =
+  typeof import.meta.dirname === "string"
+    ? import.meta.dirname
+    : dirname(fileURLToPath(import.meta.url));
+
+const REPO_ROOT = resolve(currentDir, "..", "..", "..");
 const BIN_PATH = join(REPO_ROOT, "bin", "rsc-sentinel.js");
 const PKG_VERSION = (
   JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf-8")) as {
