@@ -21,7 +21,7 @@
     }
   },
   "bin": {
-    "rsc-sentinel": "./bin/rsc-sentinel.js"
+    "rsc-sentinel": "bin/rsc-sentinel.js"
   },
   "files": [
     "dist",
