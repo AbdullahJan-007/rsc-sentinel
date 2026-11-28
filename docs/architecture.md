@@ -21,9 +21,11 @@ flowchart TD
     subgraph ScannerPkg["rsc-sentinel/scanner (Node.js >= 20)"]
         CLI["bin/rsc-sentinel.js -> src/cli.ts"]
         SCAN["scan() Orchestrator"]
-        RUNNER["Cross-Platform execNpm (win32 / POSIX)"]
+        RUNNER["Cross-Platform execPackageManager (npm / pnpm / yarn)"]
+        ADAPT["PM Adapters (pnpm / yarn Berry & Classic)"]
         ANALYZE["analyzeAuditReport + filterScanResult"]
         VER["getInstalledVersion (Path-Safe Resolver)"]
+        SARIF["toSarif() (SARIF 2.1.0 Formatter)"]
     end
 
     SA --> CAG
@@ -33,9 +35,11 @@ flowchart TD
     TO --> ERR
 
     CLI --> SCAN
+    CLI --> SARIF
     CLI --> RUNNER
     SCAN --> RUNNER
-    SCAN --> ANALYZE
+    RUNNER --> ADAPT
+    ADAPT --> ANALYZE
     ANALYZE --> VER
 ```
 
@@ -54,17 +58,15 @@ flowchart TD
 
 ## 3. Data Flow
 
-### 3.1 Scanner Pipeline
-1. **Pre-flight validation (`runNpmAudit`):** Verifies `package.json` (`NO_PACKAGE_JSON`) and `package-lock.json` (`NO_LOCKFILE`).
-2. **Cross-platform execution (`execNpm`):** Runs `npm audit --json` with a 32 MiB buffer cap and configurable timeout (default 60s). On Windows, safely dispatches via `cmd.exe /d /s /c npm ...` with `windowsHide: true` and fixed static arguments.
-3. **Schema validation:** Rejects non-JSON, `{ error: ... }` payloads, `null`, and non-object `vulnerabilities` shapes.
-4. **Normalization (`analyzeAuditReport`):**
-   - Skips transitive string pointers in `via`.
-   - Deduplicates by `(packageName, advisoryUrl)`.
-   - Resolves actual installed version from `node_modules` via `vuln.nodes` → local `node_modules` → hoisted ancestor `node_modules`.
-   - Normalizes `fixAvailable` (`true` | `false` | `{ name, version, isSemVerMajor }`).
-   - Classifies `isRscRelated` and sorts deterministically.
-5. **Filtering (`filterScanResult`):** Applies optional `rscOnly` and `minSeverity` thresholds and recomputes severity totals and `clean`.
+### 3.1 Multi-PM Scanner & SARIF Pipeline
+1. **Pre-flight & lockfile detection (`runAudit` + `detectPackageManager`):** Verifies `package.json` (`NO_PACKAGE_JSON`) and auto-detects `pnpm-lock.yaml` → `pnpm`, `yarn.lock` → `yarn`, or `package-lock.json` / `npm-shrinkwrap.json` → `npm` (or honors `--pm <manager>`).
+2. **Cross-platform execution (`execPackageManager`):** Runs fixed audit commands (`npm audit --json`, `pnpm audit --json`, `yarn npm audit --json` with fallback to `yarn audit --json`) with a 32 MiB buffer cap and configurable timeout (default 60s). On Windows, safely dispatches via `cmd.exe /d /s /c <pm> ...` with `windowsHide: true`.
+3. **Adapter normalization (`adapters.ts`):** Converts pnpm `advisories` maps and Yarn Berry/Classic NDJSON into the canonical `NpmAuditReport` shape.
+4. **Analysis (`analyzeAuditReport`):**
+   - Skips transitive string pointers in `via` and deduplicates by `(packageName, advisoryUrl)`.
+   - Resolves actual installed versions from `node_modules` via `vuln.nodes` → local `node_modules` → hoisted ancestor `node_modules`.
+   - Normalizes `fixAvailable` (`true` | `false` | `{ name, version, isSemVerMajor }`), tags `isRscRelated`, and sorts deterministically.
+5. **Filtering & Output (`filterScanResult` / `toSarif`):** Applies `--rsc-only` and `--fail-on <severity>`, then outputs human-readable text, strict JSON (`--json`), or SARIF 2.1.0 (`--sarif`).
 
 ### 3.2 Server Action Guard Pipeline
 1. **Eager config validation:** Rejects invalid numeric limits (`NaN`, `Infinity`, `<= 0`) with `RangeError` at guard construction time.
@@ -73,9 +75,7 @@ flowchart TD
    - Non-`FormData`: traverses strings, `Blob`, `ArrayBuffer`, `TypedArray`, `Map`, `Set`, arrays, and own enumerable object keys with depth enforcement (`maxObjectDepth`), cycle tracking (`WeakSet`), and byte caps (`maxPayloadBytes`).
 3. **Bounded execution (`executeGuarded`):**
    - Creates an `AbortController` and passes `controller.signal` to the action.
-   - Races the action promise against a `setTimeout` promise.
-   - Attaches a late-rejection handler to the action promise so post-timeout rejections never crash Node.js with `UnhandledPromiseRejection`.
-   - Always clears the timer in `finally`.
+   - Races the action promise against a `setTimeout` promise and attaches a late-rejection handler (`onLateError`) so post-timeout rejections never crash Node.js.
 4. **Result serialization (`safeRun` / `wrapSafe`):**
    - Re-throws Next.js control-flow errors (`NEXT_REDIRECT`, `NEXT_NOT_FOUND`, `NEXT_HTTP_ERROR_FALLBACK`) untouched.
-   - Converts `ActionGuardError` into `{ ok: false, error: { reason, message } }` so Next.js production error sanitization never hides guard feedback from Client Components.
+   - Converts `ActionGuardError` into `{ ok: false, error: { reason, message } }`.

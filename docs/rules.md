@@ -1,6 +1,6 @@
 # Engineering & Security Standards — `rsc-sentinel`
 
-Standards governing runtime isolation, TypeScript safety, security invariants, and npm release verification for `rsc-sentinel`.
+Standards governing runtime isolation, TypeScript safety, security invariants, CI compatibility, and npm release verification for `rsc-sentinel`.
 
 ---
 
@@ -17,11 +17,11 @@ Standards governing runtime isolation, TypeScript safety, security invariants, a
 
 ---
 
-## 2. TypeScript & Compatibility
+## 2. TypeScript & Cross-Platform Compatibility
 
 1. **Strict Compiler Settings:** Maintain `strict`, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes` in `tsconfig.json`.
 2. **Type Safety:** Avoid `any` and `@ts-ignore`; use `unknown` with explicit runtime type guards.
-3. **Node.js `>= 20.0.0` Compatibility:** Runtime code and tests MUST run cleanly on Node.js 20, 22, and 24 without experimental flags.
+3. **Node.js `>= 20.0.0` Compatibility:** Runtime code and tests MUST run cleanly across Linux, macOS, and Windows on Node.js 20, 22, and 24 without experimental flags or shell glob assumptions (`scripts/run-tests.mjs` passes explicit file paths to `node --test`).
 4. **Single Source of Truth for Version:** `src/cli.ts` reads the package version dynamically from `package.json`.
 
 ---
@@ -32,7 +32,7 @@ Standards governing runtime isolation, TypeScript safety, security invariants, a
 2. **Zero Unhandled Rejections:** Timeout races attach a `.catch()` handler to the background action promise (`onLateError`) so late failures never terminate the Node.js process.
 3. **Isolated Observability Hooks:** `onBlocked` and `onLateError` execute inside `try/catch` so logging failures cannot bypass or mask guard rejections.
 4. **Path Containment:** Package names and `vuln.nodes` entries from audit reports are regex-validated and containment-checked (`isPathInside`) before filesystem reads.
-5. **Safe Subprocess Execution:** Only fixed, static `npm` arguments are passed to `execNpm`; untrusted user input is never interpolated into shell commands.
+5. **Safe Subprocess Execution:** Only fixed, static package manager arguments (`npm`, `pnpm`, `yarn`) are passed to `execPackageManager`; untrusted user input is never interpolated into shell commands.
 6. **Accurate Security Claims:** Documentation explicitly distinguishes async timeout protection from synchronous CPU-exhaustion bugs.
 
 ---
@@ -49,6 +49,6 @@ npm run pack:check
 ```
 
 Verify:
+- All 9 CI matrix jobs (`ubuntu`, `windows`, `macos` × Node `20`, `22`, `24`) are green.
 - `npm pack --dry-run` includes only `dist/`, `bin/`, `README.md`, `LICENSE`, and `package.json`.
 - `node ./bin/rsc-sentinel.js --version` matches `package.json`.
-- `node ./bin/rsc-sentinel.js check` exits `0` on a clean repository.

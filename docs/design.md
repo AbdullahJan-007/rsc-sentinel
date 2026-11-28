@@ -18,10 +18,8 @@ import {
 } from "rsc-sentinel/guard";
 ```
 
-#### Recommended Next.js `"use server"` Pattern
-Next.js's SWC compiler enforces that every export of a `"use server"` module MUST be an `export async function` declaration. Exporting `export const fn = withActionGuard(...)` fails `next build`.
-
-Therefore, `createActionGuard()` is the primary Next.js API:
+#### Next.js `"use server"` Pattern
+Next.js's SWC compiler enforces that every export of a `"use server"` module MUST be an `export async function` declaration. `createActionGuard()` is designed specifically for this convention:
 
 ```ts
 "use server";
@@ -36,14 +34,10 @@ const guard = createActionGuard({
 
 export async function submitContact(formData: FormData) {
   return guard.safeRun([formData], async (signal) => {
-    // Pass `signal` to fetch() or DB drivers for cooperative cancellation.
     return { submitted: true };
   });
 }
 ```
-
-#### Why `safeRun` Returns `ActionGuardResult<T>`
-In Next.js production builds, thrown `Error` instances crossing the Server → Client boundary are stripped to a generic digest error (`"An error occurred in the Server Components render"`). `err instanceof ActionGuardError` in a Client Component will **not** work in production. Returning `{ ok: true, data }` or `{ ok: false, error: { reason, message } }` is 100% RSC-serializable and works identically in dev and prod.
 
 ---
 
@@ -52,9 +46,14 @@ In Next.js production builds, thrown `Error` instances crossing the Server → C
 ```ts
 import {
   scan,
+  runAudit,
+  runNpmAudit,
   analyzeAuditReport,
   filterScanResult,
-  runNpmAudit,
+  normalizePnpmAuditReport,
+  normalizeYarnAuditOutput,
+  toSarif,
+  detectPackageManager,
   getInstalledVersion,
   NpmAuditError,
   isRscRelated,
@@ -65,40 +64,40 @@ import {
   type ScanResult,
   type Finding,
   type Severity,
+  type PackageManager,
+  type SarifLog,
 } from "rsc-sentinel/scanner";
 ```
 
 ---
 
-## 2. Security Mechanisms
+## 2. Security & Reliability Mechanisms
 
 ### 2.1 Path-Safe Version Resolution (`getInstalledVersion`)
 - Validates `packageName` against `/^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i`.
-- Rejects null bytes (`\0`) and checks `isPathInside(root, candidate)` using `path.relative()` before touching the filesystem.
-- Prevents hostile or corrupted audit reports from reading `package.json` outside `node_modules`.
+- Rejects null bytes (`\0`) and checks `isPathInside(root, candidate)` using `path.relative()` before reading from disk.
+- Resolution order: `vuln.nodes` → direct `node_modules` → ancestor hoisted `node_modules` (max depth 10).
 
 ### 2.2 Short-Circuiting & Cycle-Safe Payload Inspection
-- Uses a single module-scoped `TextEncoder` instance.
-- Checks limits **during** iteration (not after summing the entire payload), so a 100 MB payload fails on the first offending entry/chunk.
-- Uses `WeakSet<object>` for visited objects to prevent infinite recursion on cyclic object graphs.
-- Uses `Object.keys()` (own enumerable properties only) to avoid prototype-chain traversal.
-- Wraps `onBlocked` and `onLateError` in `try/catch` so observability failures can never disable security enforcement.
+- Uses a single module-scoped `TextEncoder` instance and checks limits during iteration.
+- Tracks visited objects with `WeakSet<object>` to prevent stack overflow on cyclic references.
+- Iterates `Object.keys()` only (immune to prototype-chain traversal).
+- Isolates `onBlocked` and `onLateError` callbacks inside `try/catch`.
 
-### 2.3 Deterministic Finding Sort Order
-Findings are sorted by:
-1. `SEVERITY_ORDER[severity]` descending (`critical` → `info`)
-2. `isRscRelated` descending (RSC findings first within same severity)
-3. `cvssScore` descending (`null` treated as `-1`)
-4. `packageName` ascending (`localeCompare`)
-5. `url` ascending (`localeCompare`)
+### 2.3 SARIF 2.1.0 Schema (`toSarif`)
+- Maps `critical`/`high` → `"error"`, `moderate` → `"warning"`, `low`/`info` → `"note"`.
+- Derives stable rule IDs (`<packageName>/<GHSA-ID>` or `<packageName>/<CVE-ID>`), attaches CVSS `security-severity`, `rsc` & CWE tags, `helpUri`, and lockfile `artifactLocation.uri` (`package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`).
+
+### 2.4 Cross-Platform Test Runner (`scripts/run-tests.mjs`)
+- Discovers compiled `dist-test/tests/**/*.test.js` files via `node:fs` and spawns `node --test <explicit files>`, eliminating `cmd.exe` vs `bash` glob-expansion discrepancies across Node 20, 22, and 24.
 
 ---
 
 ## 3. CLI Specification
 
 ### Commands
-- `rsc-sentinel check [--json] [--path <dir>] [--rsc-only] [--fail-on <severity>] [--timeout <ms>]`
-- `rsc-sentinel fix [--force] [--path <dir>]`
+- `rsc-sentinel check [--json | --sarif] [--path <dir>] [--pm <auto|npm|pnpm|yarn>] [--rsc-only] [--fail-on <severity>] [--timeout <ms>]`
+- `rsc-sentinel fix [--force] [--path <dir>] [--pm <auto|npm|pnpm|yarn>]`
 - `rsc-sentinel --help` / `-h`
 - `rsc-sentinel --version` / `-v`
 
@@ -107,15 +106,4 @@ Findings are sorted by:
 | --- | --- |
 | `0` | Clean scan / successful fix / `--help` / `--version` |
 | `1` | One or more vulnerabilities found meeting the threshold (or `fix` left unresolved issues) |
-| `2` | Invalid arguments, unknown command, missing `package.json`/`package-lock.json`, `npm` missing, timeout, or invalid audit output |
-
-### JSON Error Contract (`--json`)
-When `--json` is passed and an exit-code-`2` error occurs, stdout always receives valid JSON:
-```json
-{
-  "error": {
-    "code": "NO_LOCKFILE",
-    "message": "No package-lock.json found..."
-  }
-}
-```
+| `2` | Invalid arguments, conflicting flags (`--json` + `--sarif`), unknown command, missing `package.json`/lockfile, PM unavailable, or timeout |
